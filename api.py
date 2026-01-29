@@ -1,189 +1,166 @@
 from flask import Flask, jsonify
-import requests
-import statistics
-import math
-from datetime import datetime
+import threading
+import websocket
+import json
+import time
+from collections import deque
+
+# ================== CONFIG ==================
+WS_URL = "wss://taixiumd5.system32-cloudfare-356783752985678522.monster/signalr/connect"
+PING_INTERVAL = 15
+MAX_HISTORY = 100
+FILE_NAME = "thuat_toan_tai_xiu.txt"
 
 app = Flask(__name__)
-PORT = 3000
+lock = threading.Lock()
 
-# ===================== SIÊU THUẬT TOÁN AI (PRO ENSEMBLE) ======================
+# ================== DATA STORE ==================
+results_history = deque(maxlen=MAX_HISTORY)
 
-class TaiXiuSuperAI:
-    def __init__(self, window_size=50):
-        self.window_size = window_size
-        self.history = []
-        self.totals = []
-        # Hệ thống tự học: Khởi tạo trọng số cho 10 chiến thuật mở rộng
-        self.weights = [1.0] * 10 
-        self.last_predictions = []
+latest_result = {
+    "phien": None,
+    "xuc_xac_1": -1,
+    "xuc_xac_2": -1,
+    "xuc_xac_3": -1,
+    "tong": -1,
+    "ket_qua": None,
+    "xac_suat_tai": 0,
+    "xac_suat_xiu": 0,
+    "trang_thai_cau": "Chưa đủ dữ liệu",
+    "loi_khuyen": "Chờ thêm",
+    "do_tin_cay": 0,
+    "id": "xocdia88-real"
+}
 
-    def update_data(self, new_label, new_total):
-        # 1. Cơ chế tự học: Kiểm tra kết quả ván trước để cập nhật trọng số uy tín
-        if self.last_predictions and self.history:
-            actual_last = new_label
-            for i, pred in enumerate(self.last_predictions):
-                if pred == actual_last:
-                    self.weights[i] = min(self.weights[i] + 0.1, 5.0) # Tăng uy tín nếu đoán đúng
-                else:
-                    self.weights[i] = max(self.weights[i] - 0.1, 0.1) # Giảm uy tín nếu đoán sai
+# ================== HELPER ==================
+def xac_dinh_tai_xiu(tong):
+    return "Tài" if tong >= 11 else "Xỉu"
 
-        # 2. Cập nhật dữ liệu mới vào bộ nhớ đệm
-        self.history.append(new_label)
-        self.totals.append(new_total)
-        
-        if len(self.history) > self.window_size:
-            self.history.pop(0)
-            self.totals.pop(0)
+# ================== PHÂN TÍCH CẦU (THẬT) ==================
+def phan_tich_10_phien(history):
+    if len(history) < 5:
+        return 0, 0, "Chưa đủ dữ liệu", "Không nên vào", 0
 
-    # --- Nhóm Thuật Toán Phân Tích Kỹ Thuật ---
-    def ai_rsi_momentum(self):
-        if len(self.totals) < 14: return "Tài", 50
-        gains = [max(0, self.totals[i] - self.totals[i-1]) for i in range(-13, 0)]
-        losses = [max(0, self.totals[i-1] - self.totals[i]) for i in range(-13, 0)]
-        avg_gain = sum(gains) / 14
-        avg_loss = sum(losses) / 14
-        rs = avg_gain / (avg_loss + 0.0001)
-        rsi = 100 - (100 / (1 + rs))
-        if rsi > 70: return "Xỉu", 88 
-        if rsi < 30: return "Tài", 88
-        return ("Xỉu" if rsi > 50 else "Tài"), 60
+    last_10 = list(history)[-10:]
+    tai = last_10.count("Tài")
+    xiu = last_10.count("Xỉu")
 
-    def ai_bollinger_bands(self):
-        if len(self.totals) < 20: return "Xỉu", 50
-        sma = statistics.mean(self.totals[-20:])
-        std_dev = statistics.stdev(self.totals[-20:])
-        upper = sma + (1.8 * std_dev)
-        lower = sma - (1.8 * std_dev)
-        curr = self.totals[-1]
-        if curr > upper: return "Xỉu", 92
-        if curr < lower: return "Tài", 92
-        return ("Tài" if curr < sma else "Xỉu"), 65
+    p_tai = round(tai / len(last_10) * 100)
+    p_xiu = round(xiu / len(last_10) * 100)
 
-    # --- Nhóm Thuật Toán Xác Suất Chuỗi (Markov) ---
-    def ai_markov_depth_2(self):
-        if len(self.history) < 15: return "Tài", 50
-        pattern = "".join([h[0] for h in self.history[-2:]])
-        full_str = "".join([h[0] for h in self.history])
-        t_c = full_str.count(pattern + "T")
-        x_c = full_str.count(pattern + "X")
-        return ("Tài", 85) if t_c > x_c else ("Xỉu", 85)
+    last_3 = last_10[-3:]
+    last_4 = last_10[-4:]
 
-    def ai_markov_depth_3(self):
-        if len(self.history) < 20: return "Xỉu", 50
-        pattern = "".join([h[0] for h in self.history[-3:]])
-        full_str = "".join([h[0] for h in self.history])
-        t_c = full_str.count(pattern + "T")
-        x_c = full_str.count(pattern + "X")
-        return ("Tài", 90) if t_c > x_c else ("Xỉu", 90)
+    trang_thai = "Cầu bình thường"
+    khuyen = "Theo dõi thêm"
+    tin_cay = 50
 
-    # --- Nhóm Thuật Toán Nhận Diện Cầu Thực Tế ---
-    def ai_bridge_detector(self):
-        """Bắt cầu 1-1, 2-2"""
-        if len(self.history) < 4: return "Tài", 50
-        h = self.history
-        if h[-1] != h[-2] and h[-2] != h[-3]: return ("Tài" if h[-1] == "Xỉu" else "Xỉu"), 85
-        if h[-1] == h[-2] and h[-3] == h[-4] and h[-1] != h[-3]: return ("Tài" if h[-1] == "Xỉu" else "Xỉu"), 80
-        return h[-1], 55
+    # Cầu bệt
+    if last_3 == ["Tài"]*3 or last_3 == ["Xỉu"]*3:
+        trang_thai = "Cầu bệt (đẹp)"
+        khuyen = "Có thể vào tiếp"
+        tin_cay = 75
 
-    def ai_streak_follow(self):
-        """Đu bệt khi có dây từ 4 ván trở lên"""
-        streak = 1
-        for i in range(len(self.history)-1, 0, -1):
-            if self.history[i] == self.history[i-1]: streak += 1
-            else: break
-        if streak >= 4: return self.history[-1], 85
-        return ("Xỉu" if self.history[-1] == "Tài" else "Tài"), 60
+    # Cầu 1-1
+    elif last_4 == ["Tài","Xỉu","Tài","Xỉu"] or last_4 == ["Xỉu","Tài","Xỉu","Tài"]:
+        trang_thai = "Cầu 1-1 (rất đẹp)"
+        khuyen = "Vào được (đánh đảo)"
+        tin_cay = 85
 
-    # ================= TỔNG HỢP VÀ PHÂN TÍCH CUỐI =================
+    # Cầu xấu
+    elif tai >= 8 or xiu >= 8:
+        trang_thai = "Cầu xấu / nhiễu"
+        khuyen = "KHÔNG NÊN VÀO"
+        tin_cay = 20
 
-    def analyze(self):
-        if len(self.history) < 15:
-            return {"status": "DATA_COLLECTING", "remaining": 15 - len(self.history)}
+    # GHI FILE TXT
+    with open(FILE_NAME, "w", encoding="utf-8") as f:
+        f.write("=== THUẬT TOÁN TÀI XỈU (REAL DATA) ===\n")
+        f.write(f"Thời gian: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"10 phiên gần nhất: {' - '.join(last_10)}\n")
+        f.write(f"Xác suất: Tài {p_tai}% | Xỉu {p_xiu}%\n")
+        f.write(f"Trạng thái cầu: {trang_thai}\n")
+        f.write(f"Lời khuyên: {khuyen}\n")
+        f.write(f"Độ tin cậy: {tin_cay}%\n")
 
-        # Chạy 6 thuật toán lõi (có thể mở rộng thêm ở đây)
-        algo_pool = [
-            self.ai_rsi_momentum(),
-            self.ai_bollinger_bands(),
-            self.ai_markov_depth_2(),
-            self.ai_markov_depth_3(),
-            self.ai_bridge_detector(),
-            self.ai_streak_follow()
-        ]
+    return p_tai, p_xiu, trang_thai, khuyen, tin_cay
 
-        self.last_predictions = [res[0] for res in algo_pool]
-        votes = {"Tài": 0.0, "Xỉu": 0.0}
-
-        for i, (pred, conf) in enumerate(algo_pool):
-            # Điểm bầu chọn = (Độ tin cậy thuật toán) * (Trọng số uy tín thực tế)
-            votes[pred] += (conf * self.weights[i])
-
-        total_power = votes["Tài"] + votes["Xỉu"]
-        decision = "Tài" if votes["Tài"] > votes["Xỉu"] else "Xỉu"
-        confidence = (votes[decision] / total_power) * 100
-
-        return {
-            "prediction": decision,
-            "confidence": f"{round(min(confidence, 98.5), 2)}%",
-            "signals": {
-                "tai_power": round(votes["Tài"], 1),
-                "xiu_power": round(votes["Xỉu"], 1)
-            },
-            "advice": self._generate_advice(confidence, votes)
-        }
-
-    def _generate_advice(self, conf, votes):
-        diff = abs(votes["Tài"] - votes["Xỉu"])
-        if conf > 85 and diff > 150: return "🔥 TỰ TIN VÀO LỆNH (BIG WIN)"
-        if conf > 75: return "✅ CẦU ĐẸP - VÀO ĐỀU TAY"
-        if conf > 60: return "⚠️ CẦU NHẸ - ĐÁNH THĂM DÒ"
-        return "❌ CẦU LOẠN - NÊN BỎ QUA"
-
-# Khởi tạo Global Bot
-bot = TaiXiuSuperAI()
-
-# ======================== API SERVER ========================
-
-@app.route("/api/taixiu/", methods=["GET"])
-def taixiu_api():
+# ================== WEBSOCKET ==================
+def on_message(ws, message):
     try:
-        # 1. Fetch dữ liệu từ API sàn
-        resp = requests.get("https://1.bot/GetNewLottery/LT_TaixiuMD5", timeout=10)
-        data_json = resp.json()
-        
-        if data_json.get("state") != 1:
-            return jsonify({"error": "API_SOURCE_DOWN"}), 503
-        
-        raw_data = data_json["data"]
-        d1, d2, d3 = map(int, raw_data["OpenCode"].split(","))
-        total = d1 + d2 + d3
-        result = "Tài" if total >= 11 else "Xỉu"
+        data = json.loads(message)
+        if "M" not in data:
+            return
 
-        # 2. Cập nhật dữ liệu vào AI để học và lưu lịch sử
-        bot.update_data(result, total)
+        for item in data["M"]:
+            if item.get("M") != "Md5sessionInfo":
+                continue
 
-        # 3. Thực hiện phân tích phiên tiếp theo
-        analysis = bot.analyze()
+            info = item["A"][0]
+            phien = info.get("SessionID")
+            r = info.get("Result", {})
 
-        return jsonify({
-            "Phien_hien_tai": raw_data["Expect"],
-            "Ket_qua_vua_ra": {
-                "Xuc_xac": f"{d1}-{d2}-{d3}",
-                "Tong": total,
-                "Loai": result
-            },
-            "Du_doan_AI": analysis,
-            "He_thong_tu_hoc": {
-                "Do_on_dinh_weights": round(statistics.mean(bot.weights), 2),
-                "Phien_da_luu": len(bot.history)
-            },
-            "Timestamp": datetime.now().strftime("%H:%M:%S")
-        })
+            d1, d2, d3 = r.get("Dice1"), r.get("Dice2"), r.get("Dice3")
+            if not all(isinstance(x, int) for x in [d1, d2, d3]):
+                return
+
+            tong = d1 + d2 + d3
+            ket_qua = xac_dinh_tai_xiu(tong)
+
+            with lock:
+                if latest_result["phien"] == phien:
+                    return
+
+                if latest_result["ket_qua"]:
+                    results_history.append(latest_result["ket_qua"])
+
+                p_tai, p_xiu, trang_thai, khuyen, tin_cay = phan_tich_10_phien(results_history)
+
+                latest_result.update({
+                    "phien": phien,
+                    "xuc_xac_1": d1,
+                    "xuc_xac_2": d2,
+                    "xuc_xac_3": d3,
+                    "tong": tong,
+                    "ket_qua": ket_qua,
+                    "xac_suat_tai": p_tai,
+                    "xac_suat_xiu": p_xiu,
+                    "trang_thai_cau": trang_thai,
+                    "loi_khuyen": khuyen,
+                    "do_tin_cay": tin_cay
+                })
+
+                print(f"[REAL] {phien} | {d1}-{d2}-{d3} | {ket_qua} | {khuyen}")
 
     except Exception as e:
-        return jsonify({"error": "SERVER_ERROR", "details": str(e)}), 500
+        print("WS error:", e)
 
+def on_open(ws):
+    ws.send(json.dumps({"protocol": "json", "version": 1}) + "\x1e")
+
+def start_ws():
+    while True:
+        try:
+            ws = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
+            ws.run_forever(ping_interval=PING_INTERVAL, ping_timeout=5)
+        except:
+            time.sleep(5)
+
+# ================== API ==================
+@app.route("/")
+def home():
+    return "✅ XocDia88 REAL – Thống kê & soi cầu (10 phiên)"
+
+@app.route("/api/taixiumd5")
+def api():
+    with lock:
+        return jsonify({
+            **latest_result,
+            "lich_su_10_phien": list(results_history)[-10:]
+        })
+
+# ================== MAIN ==================
 if __name__ == "__main__":
-    print(f"🚀 AI Ensemble System đang chạy tại http://localhost:{PORT}")
-    # Tắt debug mode để đảm bảo tính ổn định cho trọng số AI
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    print("🚀 Khởi động soi cầu REAL (xocdia88)...")
+    threading.Thread(target=start_ws, daemon=True).start()
+    app.run(host="0.0.0.0", port=5000)
