@@ -7,17 +7,25 @@ from collections import defaultdict, deque
 
 app = Flask(__name__)
 
+# ================= CONFIG =================
+MIN_PHIEN   = 15
+MAX_HISTORY = 50
+
+API_LIST = [
+    "https://luck8bot.com/api/GetNewLottery/TaixiuMd5?id=",
+    "http://luck8bot.com/api/GetNewLottery/TaixiuMd5?id="
+]
+
+# ================= DATA =================
+history  = deque(maxlen=MAX_HISTORY)   # "T"/"X"
+hist_pt  = deque(maxlen=MAX_HISTORY)   # tổng điểm
+lich_su  = []
+stats    = {"tong":0,"dung":0,"sai":0,"cd":0,"cs":0,"max_cd":0,"max_cs":0}
 last_result = {}
-history     = deque(maxlen=50)   # "T" / "X"
-hist_full   = deque(maxlen=50)   # "Tài" / "Xỉu"
-hist_pt     = deque(maxlen=50)   # tổng điểm
-lich_su     = []
-stats       = {"tong":0,"dung":0,"sai":0,"cd":0,"cs":0,"max_cd":0,"max_cs":0}
 _prev_pred  = None
-MIN_PHIEN   = 20
 
 # ═══════════════════════════════════════════
-#  AI ENGINE – 15 MÔ HÌNH
+#  AI ENGINE
 # ═══════════════════════════════════════════
 
 _t1 = defaultdict(lambda: {"T":0,"X":0})
@@ -32,6 +40,7 @@ _acc = {k: {"ok":0,"n":0} for k in
 _prev_model = {}
 
 
+# ── Markov bậc 1→5 ──────────────────────────────────
 def _train_markov():
     for tb in (_t1,_t2,_t3,_t4,_t5):
         for d in tb.values(): d.update({"T":0,"X":0})
@@ -49,13 +58,15 @@ def _s(table, key):
 
 def _sc_markov():
     h=list(history)
-    s1=_s(_t1,h[-1])          if len(h)>=1 else {"T":0.0,"X":0.0}
-    s2=_s(_t2,h[-2]+h[-1])    if len(h)>=2 else {"T":0.0,"X":0.0}
+    s1=_s(_t1,h[-1])           if len(h)>=1 else {"T":0.0,"X":0.0}
+    s2=_s(_t2,h[-2]+h[-1])     if len(h)>=2 else {"T":0.0,"X":0.0}
     s3=_s(_t3,"".join(h[-3:])) if len(h)>=3 else {"T":0.0,"X":0.0}
     s4=_s(_t4,"".join(h[-4:])) if len(h)>=4 else {"T":0.0,"X":0.0}
     s5=_s(_t5,"".join(h[-5:])) if len(h)>=5 else {"T":0.0,"X":0.0}
     return s1,s2,s3,s4,s5
 
+
+# ── N-Gram tối đa 12 phiên ───────────────────────────
 def _train_ngram():
     _ng.clear(); h=list(history)
     for ln in range(1,13):
@@ -72,6 +83,8 @@ def _sc_ngram():
         w=ln**4; sc["T"]+=w*d["T"]/t; sc["X"]+=w*d["X"]/t
     return sc
 
+
+# ── Streak Reversal ─────────────────────────────────
 def _train_streak():
     for d in _sd.values(): d.clear()
     h=list(history)
@@ -102,6 +115,8 @@ def _sc_streak():
     other="X" if cur=="T" else "T"
     return {cur:longer/total, other:ended/total}
 
+
+# ── Point Bias + Slope ──────────────────────────────
 def _sc_point(w=20):
     pts=list(hist_pt)
     if len(pts)<5: return {"T":0.5,"X":0.5}
@@ -109,18 +124,23 @@ def _sc_point(w=20):
     avg=sum(recent)/len(recent)
     n=len(recent)
     if n>=6:
-        h1=sum(recent[:n//2])/(n//2); h2=sum(recent[n//2:])/(n-n//2)
+        h1=sum(recent[:n//2])/(n//2)
+        h2=sum(recent[n//2:])/(n-n//2)
         slope=(h2-h1)/10.5
     else: slope=0
     p_t=max(0.0,min(1.0,(avg-3)/15+slope*0.1))
     return {"T":p_t,"X":1-p_t}
 
+
+# ── Frequency Window ────────────────────────────────
 def _sc_freq(w):
     h=list(history)
     if len(h)<w: return {"T":0.5,"X":0.5}
     ct=h[-w:].count("T"); p_x=ct/w
     return {"T":1-p_x,"X":p_x}
 
+
+# ── Momentum đa tầng ────────────────────────────────
 def _sc_momentum():
     h=list(history)
     if len(h)<20: return {"T":0.5,"X":0.5}
@@ -130,6 +150,8 @@ def _sc_momentum():
     mom=(p5-p10)*0.6+(p10-p20)*0.4
     return {"T":max(0.0,min(1.0,0.5+mom)),"X":max(0.0,min(1.0,0.5-mom))}
 
+
+# ── Repeat Pattern ──────────────────────────────────
 def _sc_repeat():
     h=list(history)
     if len(h)<8: return {"T":0.5,"X":0.5}
@@ -143,6 +165,8 @@ def _sc_repeat():
     if not total: return {"T":0.5,"X":0.5}
     return {"T":sc["T"]/total,"X":sc["X"]/total}
 
+
+# ── Alternating ─────────────────────────────────────
 def _sc_alternating():
     h=list(history)
     if len(h)<6: return {"T":0.5,"X":0.5}
@@ -155,6 +179,8 @@ def _sc_alternating():
         return {h[-1]:0.70, ("X" if h[-1]=="T" else "T"):0.30}
     return {"T":0.5,"X":0.5}
 
+
+# ── Cycle Detection ─────────────────────────────────
 def _sc_cycle():
     h=list(history)
     if len(h)<12: return {"T":0.5,"X":0.5}
@@ -174,6 +200,8 @@ def _sc_cycle():
         return {best_pred:best_score, ("X" if best_pred=="T" else "T"):1-best_score}
     return {"T":0.5,"X":0.5}
 
+
+# ── Bayesian liên tục ───────────────────────────────
 def _sc_bayesian():
     h=list(history)
     if len(h)<8: return {"T":0.5,"X":0.5}
@@ -190,6 +218,8 @@ def _sc_bayesian():
     prob=1/(1+math.exp(-log_odds))
     return {"T":prob,"X":1-prob}
 
+
+# ── Entropy & Adaptive Weight ───────────────────────
 def _entropy(w=30):
     h=list(history)[-w:]; n=len(h)
     if n==0: return 1.0
@@ -210,12 +240,11 @@ def _update_acc(actual_tx):
     for k,p in _prev_model.items():
         if p: _acc[k]["n"]+=1; _acc[k]["ok"]+=(p==actual_tx)
 
-def _update_stats(actual_full, phien_id=None):
+def _update_stats(actual_tx, phien_id=None):
     global _prev_pred
     if not _prev_pred or _prev_pred in ("Chưa đủ dữ liệu","Đang chờ"): return
-    pred_tx="T" if _prev_pred=="Tài" else "X"
-    actual_tx="T" if actual_full=="Tài" else "X"
-    dung=(pred_tx==actual_tx)
+    prev_tx="T" if _prev_pred=="Tài" else "X"
+    dung=(prev_tx==actual_tx)
     stats["tong"]+=1
     if dung:
         stats["dung"]+=1; stats["cd"]+=1; stats["cs"]=0
@@ -223,7 +252,7 @@ def _update_stats(actual_full, phien_id=None):
     else:
         stats["sai"]+=1; stats["cs"]+=1; stats["cd"]=0
         if stats["cs"]>stats["max_cs"]: stats["max_cs"]=stats["cs"]
-    lich_su.append({"phien":phien_id,"du_doan":_prev_pred,"ket_qua":actual_full,"dung":"✅" if dung else "❌"})
+    lich_su.append({"phien":phien_id,"du_doan":_prev_pred,"ket_qua":"Tài" if actual_tx=="T" else "Xỉu","dung":"✅" if dung else "❌"})
     if len(lich_su)>100: lich_su.pop(0)
 
 def _acc_str(key):
@@ -232,12 +261,10 @@ def _acc_str(key):
     return f"{a['ok']}/{a['n']} ({a['ok']/a['n']*100:.0f}%)"
 
 
-# =========================================================
-# 🧠 DỰ ĐOÁN CHÍNH – 15 MÔ HÌNH
-# =========================================================
-def predict_next():
+# ================= DỰ ĐOÁN =================
+def predict():
     if len(history)<MIN_PHIEN:
-        return "Chưa đủ dữ liệu", 0
+        return "Chưa đủ dữ liệu", "0%"
 
     _train_markov(); _train_ngram(); _train_streak()
     e=_entropy()
@@ -268,7 +295,7 @@ def predict_next():
     else:   raw={"T":0.5,"X":0.5}
 
     pred_tx="T" if raw["T"]>=raw["X"] else "X"
-    pred_full="Tài" if pred_tx=="T" else "Xỉu"
+    pred="Tài" if pred_tx=="T" else "Xỉu"
     conf=max(raw["T"],raw["X"])
 
     counted=[_acc[k]["ok"]/_acc[k]["n"] for k in _acc if _acc[k]["n"]>=10]
@@ -277,13 +304,11 @@ def predict_next():
            _win(spt),_win(sf10),_win(sf20),_win(smom),_win(srep),
            _win(salt),_win(scyc),_win(sbay)]
     dong_thuan=all_p.count(pred_tx)/len(all_p)
-
-    # Độ tin cậy 50–100% thật từ huấn luyện
     raw_conf=(conf-0.5)*2
     acc_bonus=max(0,hist_acc-0.5)*2
     thuan_bonus=max(0,dong_thuan-0.5)*2
     score=raw_conf*0.50+acc_bonus*0.30+thuan_bonus*0.20
-    do_tin_cay=round(max(50.0,min(100.0,50+score*50)),1)
+    tin_cay=round(max(50.0,min(100.0,50+score*50)),1)
 
     global _prev_model
     _prev_model={
@@ -292,144 +317,124 @@ def predict_next():
         "fr20":_win(sf20),"mom":_win(smom),"rep":_win(srep),
         "alt":_win(salt),"cyc":_win(scyc),"bay":_win(sbay)
     }
+    return pred, f"{tin_cay}%"
 
-    return pred_full, do_tin_cay
 
-
-# =========================================================
-# 🔍 Lấy dữ liệu thật
-# =========================================================
+# ================= LẤY API =================
 def get_taixiu_data():
-    url = "https://luck8bot.com/api/GetNewLottery/TaixiuMd5?id="
-    try:
-        res  = requests.get(url, timeout=5)
-        data = res.json()
-        if "data" not in data: return None
-        info     = data["data"]
-        phien    = int(info.get("Expect", 0))
-        opencode = info.get("OpenCode", "0,0,0")
-        dice     = [int(x) for x in opencode.split(",")]
-        tong     = sum(dice)
-        return phien, dice, tong
-    except:
-        return None
+    for url in API_LIST:
+        try:
+            res = requests.get(url, timeout=3)
+            if res.status_code!=200: continue
+            data = res.json()
+            if "data" not in data: continue
+            info     = data["data"]
+            phien    = int(info.get("Expect",0))
+            dice     = [int(x) for x in info.get("OpenCode","0,0,0").split(",")]
+            tong     = sum(dice)
+            return phien, dice, tong
+        except: continue
+    return None
 
 
-# =========================================================
-# ♻️ Luồng nền
-# =========================================================
-def background_updater():
+# ================= BACKGROUND =================
+def background():
     global last_result, _prev_pred
-
     last_phien = None
 
     while True:
-        result = get_taixiu_data()
+        data = get_taixiu_data()
 
-        if result:
-            phien, dice, tong = result
+        if data:
+            phien, dice, tong = data
 
-            if phien != last_phien:
-                ket_qua = "Tài" if tong>=11 else "Xỉu"
-                tx      = "T" if ket_qua=="Tài" else "X"
+            if phien!=last_phien:
+                ket = "Tài" if tong>=11 else "Xỉu"
+                tx  = "T" if ket=="Tài" else "X"
 
                 # Cập nhật stats & accuracy
-                _update_stats(ket_qua, phien)
-                if len(history)>=MIN_PHIEN:
-                    _update_acc(tx)
+                _update_stats(tx, phien)
+                if len(history)>=MIN_PHIEN: _update_acc(tx)
 
-                # Lưu lịch sử
                 history.append(tx)
-                hist_full.append(ket_qua)
                 hist_pt.append(tong)
 
-                # Dự đoán
-                du_doan, do_tin_cay = predict_next()
+                du_doan, do_tin_cay = predict()
                 _prev_pred = du_doan
 
                 # Pattern
                 h=list(history)
-                pattern_raw  ="".join(h[-20:])
-                pattern_show =pattern_raw.replace("T","T").replace("X","X")
+                pattern = "".join(h[-20:])
 
-                # Thống kê
-                so=len(history)
-                cur_val,cur_len=_cur_streak()
-                td=stats["tong"]
-                acc_s=f"{stats['dung']}/{td} ({stats['dung']/td*100:.1f}%)" if td else "Chưa có"
-
+                # JSON giữ nguyên format gốc
                 last_result = {
+                    "status": "success",
                     "data": {
-                        "Phiên":          phien,
-                        "Phiên hiện tại": phien+1,
-                        "Xúc xắc 1":      dice[0],
-                        "Xúc xắc 2":      dice[1],
-                        "Xúc xắc 3":      dice[2],
-                        "Tổng":           tong,
-                        "Kết":            ket_qua,
-                        "Dự đoán":        du_doan,
-                        "Độ tin cậy":     do_tin_cay,
-                        "Pattern":        pattern_show,
-                        "Id":             "tuananhdz"
-                    },
-                    "status": "success"
+                        "Phien":          phien,
+                        "Xuc_xac_1":      dice[0],
+                        "Xuc_xac_2":      dice[1],
+                        "Xuc_xac_3":      dice[2],
+                        "Tong":           tong,
+                        "Ket":            ket,
+                        "Phien_hien_tai": phien+1,
+                        "Du_doan":        du_doan,
+                        "Do_tin_cay":     do_tin_cay,
+                        "Pattern":        pattern
+                    }
                 }
 
                 # Terminal
-                print("\n"+"="*46)
-                print(f"  Phiên         : {phien}")
-                print(f"  Xúc xắc      : {dice[0]}  {dice[1]}  {dice[2]}")
-                print(f"  Tổng          : {tong}")
-                print(f"  Kết quả       : {ket_qua}")
-                print(f"  Chuỗi         : {cur_val} x{cur_len}" if cur_val else "  Chuỗi         : --")
-                print(f"  Bộ nhớ        : {so}/50 phiên")
-                print("-"*46)
+                so=len(history); cur_val,cur_len=_cur_streak()
+                td=stats["tong"]
+                acc_s=f"{stats['dung']}/{td} ({stats['dung']/td*100:.1f}%)" if td else "Chưa có"
+
+                print("\n"+"="*44)
+                print(f"  Phiên    : {phien}")
+                print(f"  Xúc xắc : {dice[0]}  {dice[1]}  {dice[2]}  →  {tong}")
+                print(f"  Kết quả  : {ket}")
+                print(f"  Chuỗi   : {cur_val} x{cur_len}" if cur_val else "  Chuỗi   : --")
+                print(f"  Bộ nhớ  : {so}/{MAX_HISTORY}")
+                print("-"*44)
                 if du_doan=="Chưa đủ dữ liệu":
-                    print(f"  Dự đoán       : Chờ thêm {MIN_PHIEN-so} phiên...")
+                    print(f"  Dự đoán  : Chờ thêm {MIN_PHIEN-so} phiên...")
                 else:
-                    print(f"  Pattern       : {pattern_raw[-20:]}")
-                    print(f"  Dự đoán tiếp  : >>> {du_doan} <<<")
-                    print(f"  Độ tin cậy    : {do_tin_cay}%")
-                    print("-"*46)
-                    print(f"  Đúng/Sai      : {stats['dung']}/{stats['sai']}  |  {acc_s}")
-                    print(f"  Chuỗi đúng   : {stats['cd']} (max {stats['max_cd']})")
-                    print(f"  Chuỗi sai    : {stats['cs']} (max {stats['max_cs']})")
-                print(f"  Id            : tuananhdz")
-                print("="*46)
+                    print(f"  Pattern  : {pattern}")
+                    print(f"  Dự đoán  : >>> {du_doan} <<<")
+                    print(f"  Tin cậy  : {do_tin_cay}")
+                    print(f"  Đúng/Sai : {stats['dung']}/{stats['sai']}  |  {acc_s}")
+                print("="*44)
 
                 last_phien = phien
 
-        time.sleep(5)
+        time.sleep(2)
 
 
-# =========================================================
-# 🌐 API
-# =========================================================
-@app.route("/api/taixiumd5", methods=["GET"])
-def taixiumd5():
+# ================= API =================
+@app.route("/api/taixiumd5")
+def api():
     if last_result:
         return jsonify(last_result)
-    return jsonify({"status": "đang tải dữ liệu..."})
+    return jsonify({"status": "đang chờ dữ liệu..."})
 
-@app.route("/api/lichsu", methods=["GET"])
+@app.route("/api/lichsu")
 def api_lichsu():
     td=stats["tong"]
     return jsonify({
-        "tong":    td,
-        "dung":    stats["dung"],
-        "sai":     stats["sai"],
-        "ty_le":   f"{stats['dung']/td*100:.1f}%" if td else "0%",
-        "max_cd":  stats["max_cd"],
-        "max_cs":  stats["max_cs"],
-        "20_phien":lich_su[-20:]
+        "tong":   td,
+        "dung":   stats["dung"],
+        "sai":    stats["sai"],
+        "ty_le":  f"{stats['dung']/td*100:.1f}%" if td else "0%",
+        "max_cd": stats["max_cd"],
+        "max_cs": stats["max_cs"],
+        "lich_su":lich_su[-20:]
     })
 
+@app.route("/")
+def home():
+    return jsonify({"status":"ok","data":last_result.get("data",{})})
 
 
-
-# =========================================================
-# 🚀 RUN
-# =========================================================
+# ================= RUN =================
 if __name__ == "__main__":
-    threading.Thread(target=background_updater, daemon=True).start()
+    threading.Thread(target=background, daemon=True).start()
     app.run(host="0.0.0.0", port=5000)
