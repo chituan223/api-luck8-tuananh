@@ -759,7 +759,7 @@ def background():
                 if model_confs:
                     active = {k: v for k, v in model_confs.items() if v > 0}
                     print(f"🤖 AI ({len(active)}/20 models): {active}")
-                print("=" * 70
+                print("=" * 70)
                 
                 last_phien = phien
         
