@@ -12,7 +12,7 @@ app = Flask(__name__)
 
 # ================= CONFIG =================
 MIN_PHIEN = 15
-MAX_HISTORY = 20
+MAX_HISTORY = 15
 DATA_FILE = "luckywin_ai_data.json"
 WEIGHTS_FILE = "luckywin_ai_weights.json"
 
